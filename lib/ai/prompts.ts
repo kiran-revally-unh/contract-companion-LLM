@@ -1,4 +1,4 @@
-import { BlockKind } from '@/components/block';
+// BlockKind imported elsewhere when needed; not required here.
 
 export const regularPrompt =
   'You are a friendly assistant! Keep your responses concise and helpful.';

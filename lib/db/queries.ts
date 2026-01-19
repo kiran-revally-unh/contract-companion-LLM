@@ -233,6 +233,7 @@ export async function getDocumentsById({ id }: { id: string }) {
 
 export async function getDocumentById({ id }: { id: string }) {
   try {
+    const db = getDb();
     const [selectedDocument] = await db
       .select()
       .from(document)
@@ -254,6 +255,7 @@ export async function deleteDocumentsByIdAfterTimestamp({
   timestamp: Date;
 }) {
   try {
+    const db = getDb();
     await db
       .delete(suggestion)
       .where(
@@ -280,6 +282,7 @@ export async function saveSuggestions({
   suggestions: Array<Suggestion>;
 }) {
   try {
+    const db = getDb();
     return await db.insert(suggestion).values(suggestions);
   } catch (error) {
     console.error('Failed to save suggestions in database');
@@ -293,6 +296,7 @@ export async function getSuggestionsByDocumentId({
   documentId: string;
 }) {
   try {
+    const db = getDb();
     return await db
       .select()
       .from(suggestion)
@@ -307,6 +311,7 @@ export async function getSuggestionsByDocumentId({
 
 export async function getMessageById({ id }: { id: string }) {
   try {
+    const db = getDb();
     return await db.select().from(message).where(eq(message.id, id));
   } catch (error) {
     console.error('Failed to get message by id from database');
@@ -322,6 +327,7 @@ export async function deleteMessagesByChatIdAfterTimestamp({
   timestamp: Date;
 }) {
   try {
+    const db = getDb();
     const messagesToDelete = await db
       .select({ id: message.id })
       .from(message)
@@ -360,6 +366,7 @@ export async function updateChatVisiblityById({
   visibility: 'private' | 'public';
 }) {
   try {
+    const db = getDb();
     return await db.update(chat).set({ visibility }).where(eq(chat.id, chatId));
   } catch (error) {
     console.error('Failed to update chat visibility in database');
