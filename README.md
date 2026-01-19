@@ -14,11 +14,11 @@ This README is a slow-scrolling walkthrough so viewers can understand the produc
 	<tr>
 			<td align="center">
 			<img src="app/docs/showcase3.png" alt="Analysis Results - Dashboard" width="430" /><br/>
-			<em>Results dashboard with evidence and clause table.</em>
+			<em>Home: choose type/persona/model and analyze.</em>
 		</td>
 	<td align="center">
 			<img src="app/docs/showcase1.png" alt="Home - Analyze Contract" width="430" /><br/>
-			<em>Home: choose type/persona/model and analyze.</em>
+			<em>Metrics & Export: Model, tokens, latency, retries, and PDF export</em>
 		</td>
 	
   
@@ -27,7 +27,7 @@ This README is a slow-scrolling walkthrough so viewers can understand the produc
 <p align="center">
 	<img src="app/docs/showcase4.png" alt="Diff View - Suggested Redlines" width="900" />
 	<br />
-	<em>Diff View: Suggested redlines side-by-side with the original clause.</em>
+	<em>Results dashboard with evidence and clause table.   Diff View: Suggested redlines side-by-side with the original clause.</em>
 </p>
 
 <p align="center">
