@@ -1,4 +1,6 @@
-# Coco – Contract Risk Analyzer
+# Coco – Contract Risk Analyzer   .   
+
+live @   https://main.d2f04gah5juytg.amplifyapp.com
 
 > Turning messy contract text → structured risk report using an LLM + validation + retries + metrics.
 
