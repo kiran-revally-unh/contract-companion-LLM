@@ -188,27 +188,27 @@ These screenshots highlight the core experience:
 	<tr>
 		<td align="center">
 			<img src="app/docs/showcase1.png" alt="Home - Analyze Contract" width="380" /><br/>
-			<em>Home</em>
+			<em></em>
 		</td>
 		<td align="center">
 			<img src="app/docs/showcase2.png" alt="Pipeline - Model Run & Steps" width="380" /><br/>
-			<em>Pipeline</em>
+			<em></em>
 		</td>
 	</tr>
 	<tr>
 		<td align="center">
 			<img src="app/docs/showcase3.png" alt="Analysis Results - Dashboard" width="380" /><br/>
-			<em>Results</em>
+			<em></em>
 		</td>
 		<td align="center">
 			<img src="app/docs/showcase4.png" alt="Diff View - Suggested Redlines" width="380" /><br/>
-			<em>Diff View</em>
+			<em></em>
 		</td>
 	</tr>
 	<tr>
 		<td align="center" colspan="2">
 			<img src="app/docs/showcase5.png" alt="Metrics & Export" width="770" /><br/>
-			<em>Metrics & Export</em>
+			<em></em>
 		</td>
 	</tr>
 </table>
