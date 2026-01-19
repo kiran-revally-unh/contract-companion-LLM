@@ -1,5 +1,7 @@
 import type { NextConfig } from 'next';
 
+const isProd = process.env.NODE_ENV === 'production';
+
 const nextConfig: NextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
@@ -8,7 +10,8 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   experimental: {
-    ppr: true,
+    // PPR can be unstable on some hosts; disable in production for reliability
+    ppr: isProd ? false : true,
   },
   images: {
     remotePatterns: [
