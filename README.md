@@ -54,6 +54,32 @@ The chatbot can be extended to support use cases such as customer support, inter
 
 ---
 
+## 📸 Showcase
+
+These screenshots highlight the core experience:
+
+
+<p align="center">
+	<img src="app/docs/showcase1.png" alt="Home - Analyze Contract" width="800" />
+	<br />
+	<em>Home: Select type/persona/model, paste/upload contract, and Analyze.</em>
+</p>
+<p align="center">
+	<img src="app/docs/showcase2.png" alt="Pipeline - Model Run & Steps" width="800" />
+	<br />
+	<em>Pipeline: 8 steps with Model Run metrics (tokens, latency, cost, retries).</em>
+</p>
+<p align="center">
+	<img src="app/docs/showcase3.png" alt="Analysis Results - Dashboard" width="800" />
+	<br />
+	<em>Results: Evidence-backed findings, clause table, and Export Report.</em>
+</p>
+
+Notes:
+- Images live at `app/docs/showcase1.png`, `app/docs/showcase2.png`, and `app/docs/showcase3.png` in this repo for GitHub rendering.
+
+---
+
 ## 📐 Architecture Highlights
 
 - Frontend communicates with backend services via REST APIs

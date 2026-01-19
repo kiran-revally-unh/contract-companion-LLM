@@ -3,6 +3,8 @@ import { openai } from '@ai-sdk/openai';
 import { generateObject } from 'ai';
 import { z } from 'zod';
 import { AnalyzeRequestSchema, AnalyzeResponseSchema, ContractAnalysisSchema, type ContractAnalysis } from '@/lib/contract-analyzer/schemas';
+// Ensure Node.js runtime (required for tiktoken and server-side SDKs)
+export const runtime = 'nodejs';
 import { productIntelligencePrompt } from '@/lib/ai/prompts';
 
 const MAX_RETRIES = 2;
@@ -112,13 +114,37 @@ Focus on real issues that matter to a ${persona}. Be specific and reference actu
       }, { status: 500 });
     }
 
-    const tokensUsed = {
+    let tokensUsed = {
       input: result.usage?.promptTokens || 0,
       output: result.usage?.completionTokens || 0,
       total: result.usage?.totalTokens || 0,
-    };
+    } as { input: number; output: number; total: number };
 
     const analysis: ContractAnalysis = result.object;
+
+    // Fallback: compute tokens precisely if provider didn't return usage
+    if ((tokensUsed.input + tokensUsed.output) === 0) {
+      try {
+        const tk = await import('@dqbd/tiktoken');
+        let enc;
+        try {
+          enc = tk.encoding_for_model ? tk.encoding_for_model(modelId as any) : tk.get_encoding('o200k_base');
+        } catch {
+          enc = tk.get_encoding ? tk.get_encoding('o200k_base') : undefined as any;
+        }
+        const inputText = `${productIntelligencePrompt}\n\n${json.contractText || ''}`;
+        const inputTokens = enc ? enc.encode(inputText).length : Math.ceil((json.contractText?.length || 0)/4);
+        const outputJSON = JSON.stringify(analysis || {});
+        const outputTokens = enc ? enc.encode(outputJSON).length : Math.ceil(outputJSON.length/4);
+        if (enc && enc.free) enc.free();
+        tokensUsed = { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens };
+      } catch (err) {
+        // As a last resort, approximate conservatively
+        const approxIn = Math.ceil((json.contractText?.length || 0) / 4);
+        const approxOut = Math.ceil((JSON.stringify(analysis || {}).length) / 4);
+        tokensUsed = { input: approxIn, output: approxOut, total: approxIn + approxOut };
+      }
+    }
     const processingTime = Date.now() - start;
     const estimatedCost = calculateCost(modelId, tokensUsed.input, tokensUsed.output);
 
@@ -129,6 +155,9 @@ Focus on real issues that matter to a ${persona}. Be specific and reference actu
       modelUsed: modelId,
       estimatedCost,
       retryCount: retries,
+      temperature: 0.5,
+      promptStrategy: 'Structured extraction + explainability',
+      outputFormat: 'Strict JSON (Zod-validated)'
     };
 
     const valid = AnalyzeResponseSchema.safeParse(response);

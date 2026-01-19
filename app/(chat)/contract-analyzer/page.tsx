@@ -8,7 +8,56 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { AlertDialog, AlertDialogAction, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { getWarningMessage, isInputSafe } from '@/lib/contract-analyzer/guardrails';
 import { MetricsFooter } from '@/components/contract-analyzer/metrics-footer';
-import { Shield, User, Settings } from 'lucide-react';
+import { Settings } from 'lucide-react';
+import jsPDF from 'jspdf';
+import { useRef } from 'react';
+import { AppHeader } from '@/components/app-header';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+
+// --- Fuzzy text matching helpers for robust highlighting ---
+function normalizeText(t: string) {
+  return t
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u201C\u201D]/g, '"') // normalize smart quotes
+    .replace(/[^a-z0-9\s]/g, ' ') // strip punctuation
+    .replace(/\s+/g, ' ') // collapse whitespace
+    .trim();
+}
+
+function wordSet(text: string): Set<string> {
+  return new Set(
+    normalizeText(text)
+      .split(' ')
+      .filter((w) => w.length > 3)
+  );
+}
+
+function ngrams(text: string, n: number): Set<string> {
+  const words = normalizeText(text).split(' ').filter((w) => w.length > 2);
+  const set = new Set<string>();
+  for (let i = 0; i <= words.length - n; i++) {
+    set.add(words.slice(i, i + n).join(' '));
+  }
+  return set;
+}
+
+// Returns 0..1 based on overlap of words and n-grams
+function matchScore(a: string, b: string) {
+  const A = wordSet(a);
+  const B = wordSet(b);
+  const inter = [...A].filter((w) => B.has(w)).length;
+  const union = new Set([...A, ...B]).size || 1;
+  const jaccard = inter / union;
+
+  const triA = ngrams(a, 3);
+  const triB = ngrams(b, 3);
+  const interTri = [...triA].filter((g) => triB.has(g)).length;
+  const unionTri = new Set([...triA, ...triB]).size || 1;
+  const triScore = interTri / unionTri;
+
+  // blend scores; weight tri-gram a bit more for phrase fidelity
+  return 0.4 * jaccard + 0.6 * triScore;
+}
 
 const SAMPLES: Record<string, string> = {
   tos: `Terms of Service\n\nBy using our services you agree to resolve disputes exclusively by binding arbitration and waive the right to participate in class actions. We limit liability to fees paid in the last 12 months.`,
@@ -26,23 +75,7 @@ function speak(text: string) {
   synth.speak(utter);
 }
 
-function Gauge({ score = 62 }: { score?: number }) {
-  // Render a simple semi-circle gauge using conic-gradient
-  const clamped = Math.max(0, Math.min(100, score));
-  const deg = (clamped / 100) * 180; // 0..180
-  const gradient = `conic-gradient(from 180deg, #fbbf24 ${deg}deg, #e5e7eb ${deg}deg 180deg)`;
-  return (
-    <div className="flex flex-col items-center gap-2">
-      <div className="relative w-40 h-20 overflow-hidden">
-        <div className="absolute inset-0 rounded-b-full" style={{ backgroundImage: gradient }} />
-        <div className="absolute left-1/2 -translate-x-1/2 bottom-2 text-3xl font-extrabold text-slate-900">
-          {Math.round(clamped)}
-        </div>
-      </div>
-      <div className="text-xs text-slate-500">SCORE INDEX</div>
-    </div>
-  );
-}
+// Gauge component removed as part of simplifying the form view
 
 export default function ContractAnalyzerPage() {
   const [contractText, setContractText] = useState('');
@@ -60,29 +93,55 @@ export default function ContractAnalyzerPage() {
   const [guardrailMsg, setGuardrailMsg] = useState('');
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [progressStep, setProgressStep] = useState(0);
+  const [showPipeline, setShowPipeline] = useState(false);
+  const [pipelineSteps, setPipelineSteps] = useState<Array<{ id: number; title: string; desc: string; status: 'pending'|'running'|'done'|'error'; duration?: number; output?: string }>>([
+    { id: 1, title: 'Ingest & Normalize', desc: 'extract text, detect sections, clean formatting', status: 'pending' },
+    { id: 2, title: 'PII Safety Check', desc: 'flag emails/phones/SSNs → mask or warn', status: 'pending' },
+    { id: 3, title: 'Clause Segmentation', desc: 'split into clauses with titles + offsets', status: 'pending' },
+    { id: 4, title: 'LLM Risk Pass', desc: 'LLM returns JSON risk objects', status: 'pending' },
+    { id: 5, title: 'Schema Validation (Zod)', desc: 'validate JSON shape', status: 'pending' },
+    { id: 6, title: 'Auto-Retry (if invalid)', desc: 'retry with “fix JSON” prompt', status: 'pending' },
+    { id: 7, title: 'Scoring & Categorization', desc: 'risk score + tags + confidence', status: 'pending' },
+    { id: 8, title: 'Generate Explanations', desc: 'plain English + “why” + evidence', status: 'pending' },
+  ]);
+  const [modelMetrics, setModelMetrics] = useState<{ model: string; tokensIn: number; tokensOut: number; latencySec: number; estimatedCostUSD: number; retries: number; zodPassed: boolean; confidenceThreshold: number; temperature: number; promptStrategy?: string; outputFormat?: string }>({
+    model: 'gpt-4o', tokensIn: 0, tokensOut: 0, latencySec: 0, estimatedCostUSD: 0.0, retries: 0, zodPassed: false, confidenceThreshold: 0.7, temperature: 0.2
+  });
+  const [outputOpen, setOutputOpen] = useState(false);
+  const [attemptOutputs, setAttemptOutputs] = useState<Array<{ attempt: number; json: any }>>([]);
+  const reportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const url = new URL(window.location.href);
     const typeParam = url.searchParams.get('type');
     const textParam = url.searchParams.get('text');
+    const autoParam = url.searchParams.get('auto');
+    try {
+      const pm = localStorage.getItem('preferred-model');
+      if (pm) setModelId(pm);
+    } catch {}
     
     // Auto-populate from URL params when coming from home page
     if (typeParam) {
       setContractType(typeParam as any);
     }
     if (textParam) {
-      const decodedText = decodeURIComponent(textParam);
-      setContractText(decodedText);
-      // Auto-trigger analysis immediately if both type and text are provided
-      if (typeParam) {
-        // Start loading immediately
+      let textToUse = textParam;
+      try {
+        textToUse = decodeURIComponent(textParam);
+      } catch (error) {
+        console.error('Failed to decode text parameter, using as-is:', error);
+      }
+      // Prefill only; do NOT auto-run analysis. User must click Analyze.
+      setContractText(textToUse);
+
+      // If explicitly requested (auto=1) or both type and text provided, auto-start pipeline
+      const shouldAutoRun = autoParam === '1' || !!(typeParam && textParam);
+      if (shouldAutoRun) {
+        setShowPipeline(true);
         setLoading(true);
         setProgressStep(0);
-        
-        // Trigger analysis after a brief delay to let state settle
-        setTimeout(() => {
-          analyzeContract(decodedText, typeParam as any);
-        }, 100);
+        analyzeContract(textToUse, (typeParam as any) || contractType);
       }
     }
     
@@ -134,13 +193,37 @@ export default function ContractAnalyzerPage() {
       return;
     }
 
-    // Simulate progress steps
-    const progressInterval = setInterval(() => {
-      setProgressStep(prev => {
-        if (prev < 3) return prev + 1;
-        return prev;
-      });
-    }, 1500);
+    // Simulate pipeline steps with timings and produced outputs
+    const start = performance.now();
+    const updateStep = (id: number, patch: Partial<{ status: 'pending'|'running'|'done'|'error'; duration: number; output: string }>) => {
+      setPipelineSteps(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
+    };
+
+    // 1 Ingest & Normalize
+    updateStep(1, { status: 'running' });
+    await new Promise(r => setTimeout(r, 600));
+    const charCount = text.length;
+    const sectionsDetected = (text.match(/\n\d+\./g) || []).length;
+    updateStep(1, { status: 'done', duration: Math.round(performance.now() - start), output: `${charCount} chars · ${sectionsDetected} sections` });
+
+    // 2 PII Safety Check
+    const t2 = performance.now();
+    updateStep(2, { status: 'running' });
+    const emails = (text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []).length;
+    const phones = (text.match(/\+?\d[\d\s\-()]{7,}\d/g) || []).length;
+    await new Promise(r => setTimeout(r, 400));
+    updateStep(2, { status: 'done', duration: Math.round(performance.now() - t2), output: `${emails} emails · ${phones} phones` });
+
+    // 3 Clause Segmentation
+    const t3 = performance.now();
+    updateStep(3, { status: 'running' });
+    const clauses = text.split(/\n(?=\d+\.|[A-Z][A-Za-z ]+:)/).filter(Boolean);
+    await new Promise(r => setTimeout(r, 500));
+    updateStep(3, { status: 'done', duration: Math.round(performance.now() - t3), output: `${clauses.length} clauses` });
+
+    // 4 LLM Risk Pass (request sent)
+    const t4 = performance.now();
+    updateStep(4, { status: 'running', output: 'requesting…' });
     
     if (analysis) {
       localStorage.setItem('contract-last-analysis', JSON.stringify(analysis));
@@ -154,27 +237,76 @@ export default function ContractAnalyzerPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contractText: text, contractType: type, jurisdiction, persona, modelId }),
       });
-      const data = await res.json();
+      let data: any = null;
+      let rawText = '';
+      const ct = res.headers.get('content-type') || '';
+      try {
+        if (ct.includes('application/json')) {
+          data = await res.json();
+        } else {
+          rawText = await res.text();
+        }
+      } catch (parseErr) {
+        try { rawText = await res.text(); } catch {}
+      }
       if (!res.ok) {
-        const errorMsg = data.isRateLimit 
+        const errorMsg = data?.isRateLimit
           ? 'OpenAI rate limit reached. Please wait 60 seconds and try again, or add a payment method to your OpenAI account.'
-          : data.error || 'Analysis failed';
+          : (data?.error || data?.message || (rawText ? rawText.slice(0, 200) : 'Analysis failed'));
         throw new Error(errorMsg);
       }
-      
-      clearInterval(progressInterval);
-      setProgressStep(4);
+      // 4 LLM Risk Pass done
+      updateStep(4, { status: 'done', duration: Math.round(performance.now() - t4), output: 'risk JSON received' });
+
+      // 5 Schema Validation
+      const t5 = performance.now();
+      updateStep(5, { status: 'running' });
+      await new Promise(r => setTimeout(r, 200));
+      const retries = data.retryCount || 0;
+      updateStep(5, { status: 'done', duration: Math.round(performance.now() - t5), output: 'valid ContractAnalysis v2' });
+
+      // 6 Auto-Retry
+      const t6 = performance.now();
+      updateStep(6, { status: 'running' });
+      await new Promise(r => setTimeout(r, 150));
+      updateStep(6, { status: 'done', duration: Math.round(performance.now() - t6), output: `${retries} retries` });
+
+      // 7 Scoring & Categorization
+      const t7 = performance.now();
+      updateStep(7, { status: 'running' });
+      await new Promise(r => setTimeout(r, 120));
+      updateStep(7, { status: 'done', duration: Math.round(performance.now() - t7), output: `score ${data.analysis.overall.risk_score}` });
+
+      // 8 Generate Explanations
+      const t8 = performance.now();
+      updateStep(8, { status: 'running' });
+      await new Promise(r => setTimeout(r, 120));
+      updateStep(8, { status: 'done', duration: Math.round(performance.now() - t8), output: 'plain-English + evidence' });
       
       setAnalysis(data.analysis);
       setMetrics({ processingTime: data.processingTime, tokensUsed: data.tokensUsed, modelUsed: data.modelUsed, estimatedCost: data.estimatedCost, retryCount: data.retryCount });
+      setModelMetrics({
+        model: data.modelUsed || modelId,
+        tokensIn: Number((data.tokensUsed?.input ?? data.tokensUsed?.prompt) || 0),
+        tokensOut: Number((data.tokensUsed?.output ?? data.tokensUsed?.completion) || 0),
+        latencySec: (data.processingTime || 0) / 1000,
+        estimatedCostUSD: Number(data.estimatedCost || 0),
+        retries: Number(data.retryCount || 0),
+        zodPassed: true,
+        confidenceThreshold: 0.7,
+        temperature: typeof data.temperature === 'number' ? data.temperature : 0.2,
+        promptStrategy: data.promptStrategy,
+        outputFormat: data.outputFormat,
+      });
       if (voiceEnabled) {
         const summary = `Overall risk ${data.analysis.overall.risk_level} with score ${data.analysis.overall.risk_score} and confidence ${(data.analysis.overall.confidence*100).toFixed(0)} percent.`;
         speak(summary);
       }
       localStorage.setItem('contract-last-analysis', JSON.stringify(data.analysis));
     } catch (e: any) {
-      clearInterval(progressInterval);
       setError(e.message);
+      updateStep(4, { status: 'error', output: e.message });
+      updateStep(5, { status: 'error' });
     } finally {
       setLoading(false);
     }
@@ -192,7 +324,8 @@ export default function ContractAnalyzerPage() {
       setError('Input too long. Please trim for faster results.');
       return;
     }
-
+    // Navigate to the pipeline screen immediately
+    setShowPipeline(true);
     setLoading(true);
     setProgressStep(0);
     
@@ -210,146 +343,356 @@ export default function ContractAnalyzerPage() {
     URL.revokeObjectURL(url);
   };
 
+  const exportPDF = () => {
+    if (!analysis) return;
+
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const marginX = 48;
+    const marginTop = 56;
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    let y = marginTop;
+
+    const addHeader = () => {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(18);
+      doc.text('Coco — Contract Analysis Report', marginX, y);
+      y += 24;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(11);
+      const meta = `Date: ${new Date().toLocaleString()}   Type: ${contractType.replace('_',' ')}   Persona: ${persona}`;
+      doc.text(meta, marginX, y);
+      y += 18;
+      doc.setDrawColor(220);
+      doc.line(marginX, y, pageWidth - marginX, y);
+      y += 16;
+    };
+
+    const ensureSpace = (needed = 40) => {
+      if (y + needed > pageHeight - marginTop) {
+        doc.addPage();
+        y = marginTop;
+        addHeader();
+      }
+    };
+
+    addHeader();
+
+    // Overview
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(14);
+    doc.text('Overview', marginX, y);
+    y += 18;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    const overviewLines = [
+      `Risk Level: ${analysis.overall.risk_level}   Score: ${analysis.overall.risk_score}`,
+      `Confidence: ${Math.round((analysis.overall.confidence || 0.85) * 100)}%`,
+    ];
+    overviewLines.forEach((line) => {
+      ensureSpace(20);
+      doc.text(line, marginX, y);
+      y += 16;
+    });
+    y += 8;
+
+    // Clauses
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(14);
+    doc.text('Findings', marginX, y);
+    y += 12;
+    doc.setDrawColor(220);
+    doc.line(marginX, y, pageWidth - marginX, y);
+    y += 14;
+
+    analysis.clauses.forEach((clause: any, idx: number) => {
+      ensureSpace(80);
+      const title = `${idx + 1}. ${clause.title || clause.category || 'Clause'}`;
+      const risk = String(clause.risk || 'standard').toUpperCase();
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(12);
+      doc.text(title, marginX, y);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text(`Risk: ${risk}`, pageWidth - marginX - 120, y);
+      y += 16;
+
+      const explanation = clause.plain_english || clause.why_risky || '';
+      const wrapped = doc.splitTextToSize(explanation, pageWidth - marginX * 2);
+      wrapped.forEach((line: string) => {
+        ensureSpace(18);
+        doc.text(line, marginX, y);
+        y += 14;
+      });
+
+      if (clause.evidence_quotes && clause.evidence_quotes.length > 0) {
+        ensureSpace(28);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Evidence:', marginX, y);
+        y += 14;
+        doc.setFont('helvetica', 'normal');
+        const quote = clause.evidence_quotes[0];
+        const quoteText = `"${quote.quote}"`;
+        const quoteWrapped = doc.splitTextToSize(quoteText, pageWidth - marginX * 2 - 12);
+        quoteWrapped.forEach((line: string) => {
+          ensureSpace(18);
+          doc.text(`• ${line}`, marginX + 6, y);
+          y += 14;
+        });
+      }
+
+      y += 8;
+    });
+
+    // Save
+    const fileName = `coco-contract-report-${Date.now()}.pdf`;
+    doc.save(fileName);
+  };
+
+  const exportFullReport = async () => {
+    if (!analysis) return;
+    const { default: html2canvas } = await import('html2canvas');
+    const node = reportRef.current;
+    if (!node) return;
+
+    // Ensure node is rendered; give browser a tick
+    await new Promise((r) => setTimeout(r, 50));
+    const canvas = await html2canvas(node, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+    const imgData = canvas.toDataURL('image/png');
+    const pdf = new jsPDF('p', 'mm', 'a4');
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const imgWidth = pageWidth;
+    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+    let heightLeft = imgHeight;
+    let position = 0;
+
+    pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+    heightLeft -= pageHeight;
+    while (heightLeft > 0) {
+      position = heightLeft - imgHeight;
+      pdf.addPage();
+      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+    }
+    pdf.save(`coco-analysis-report-${Date.now()}.pdf`);
+  };
+
   return (
     <div className="min-h-svh w-full bg-white">
       {/* Show loading progress screen when analyzing */}
-      {loading && (
+      {showPipeline && (
         <div className="min-h-svh flex flex-col bg-gradient-to-b from-gray-50 to-white">
-          {/* Header */}
-          <header className="sticky top-0 z-20 bg-white/95 backdrop-blur-xl border-b border-gray-200">
-            <div className="mx-auto max-w-7xl px-6 py-4 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="size-8 rounded-lg bg-gray-900 text-white grid place-items-center">
-                  <Shield className="size-4" />
-                </div>
-                <span className="font-bold text-lg">Coco</span>
+          <AppHeader />
+          <div className="flex-1 px-6 py-10">
+            <div className="mx-auto max-w-5xl">
+              <div className="mb-6 text-center">
+                <h1 className="text-2xl md:text-3xl font-bold text-gray-900">We’re turning messy contract text → structured risk report using an LLM + validation + retries + metrics.</h1>
               </div>
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-gray-200 bg-white text-sm font-medium">
-                  <span className="text-gray-600">GPT-4o</span>
-                </div>
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-gray-200 bg-white text-sm">
-                  <span className="text-gray-600">Private</span>
-                </div>
-                <div className="size-9 rounded-full bg-yellow-400 grid place-items-center">
-                  <User className="size-4 text-gray-900" />
-                </div>
-              </div>
-            </div>
-          </header>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Pipeline timeline */}
+                <div className="lg:col-span-2">
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+                    <div className="mb-3 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="text-sm font-semibold text-gray-900">Pipeline</div>
+                        <Select value={modelId} onValueChange={(v) => {
+                          setModelId(v);
+                          try { localStorage.setItem('preferred-model', v); } catch {}
+                          // Reset steps and re-run with new model if we have text
+                          setPipelineSteps(prev => prev.map(s => ({ ...s, status: 'pending', duration: undefined, output: undefined })));
+                          if (contractText?.trim()) {
+                            setLoading(true);
+                            setProgressStep(0);
+                            analyzeContract(contractText, contractType);
+                          }
+                        }}>
+                          <SelectTrigger className="h-8 w-[140px] text-xs">
+                            <SelectValue placeholder="Select model" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="gpt-4o">GPT-4o</SelectItem>
+                            <SelectItem value="gpt-4o-mini">GPT-4o-mini</SelectItem>
+                            <SelectItem value="gpt-4-turbo">GPT-4 Turbo</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Button
+                        className="bg-yellow-400 hover:bg-yellow-500 text-gray-900"
+                        size="sm"
+                        disabled={loading || !analysis}
+                        onClick={() => setShowPipeline(false)}
+                      >
+                        {loading ? 'Analyzing…' : 'View results'}
+                      </Button>
+                    </div>
+                    <ul className="space-y-4">
+                      {pipelineSteps.map((s) => (
+                        <li key={s.id} className="flex items-start justify-between">
+                          <div className="flex items-start gap-3">
+                            <div className={`size-6 rounded-full grid place-items-center ${s.status==='done' ? 'bg-green-100 text-green-700 border border-green-200' : s.status==='running' ? 'bg-yellow-100 text-yellow-700 border border-yellow-200' : s.status==='error' ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-gray-100 text-gray-500 border border-gray-200'}`}>{s.status==='done'?'✓':s.status==='running'?'…':s.status==='error'?'!':'•'}</div>
+                            <div>
+                              <div className="font-medium text-gray-900">{s.id}. {s.title}</div>
+                              <div className="text-xs text-gray-600">{s.desc}</div>
+                              {s.output && (<div className="mt-1 text-xs text-gray-700">Output: {s.output}</div>)}
+                            </div>
+                          </div>
+                          <div className="text-xs text-gray-500">{typeof s.duration === 'number' ? `${(s.duration/1000).toFixed(2)}s` : '—'}</div>
+                        </li>
+                      ))}
+                    </ul>
 
-          {/* Progress Content */}
-          <div className="flex-1 flex items-center justify-center px-6 py-12">
-            <div className="w-full max-w-xl">
-              {/* Icon */}
-              <div className="flex justify-center mb-8">
-                <div className="size-24 rounded-full bg-yellow-50 border-4 border-yellow-100 flex items-center justify-center">
-                  <div className="text-4xl">📄</div>
+                    {/* Explainability preview */}
+                    <div className="mt-6">
+                      <div className="text-sm font-semibold text-gray-900 mb-2">Explainability preview</div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        {([{
+                          clause: 'Arbitration', risk: 'High', confidence: 0.82, evidence: '“binding arbitration…”', why: 'Limits your ability to sue…'
+                        },{
+                          clause: 'Non-compete', risk: 'Medium', confidence: 0.74, evidence: '“shall not engage in competing activities…”', why: 'Restricts employment mobility.'
+                        },{
+                          clause: 'Liability Cap', risk: 'High', confidence: 0.79, evidence: '“limit liability to fees paid…”', why: 'Caps damages below potential harm.'
+                        }] as const).map((item, idx) => (
+                          <div key={idx} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
+                            <div className="text-xs text-gray-500">Clause</div>
+                            <div className="text-sm font-semibold text-gray-900">{item.clause}</div>
+                            <div className="mt-1 text-xs"><span className={item.risk==='High'?'text-red-600':'text-yellow-700'}>Risk: {item.risk}</span> · Confidence: {(item.confidence*100).toFixed(0)}%</div>
+                            <div className="mt-1 text-xs text-gray-700">Evidence: {item.evidence}</div>
+                            <div className="mt-1 text-xs text-gray-700">Why: {item.why}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Disclaimer */}
+                    <div className="mt-6 text-[11px] text-gray-500">Demo uses sample/public contract text. Not legal advice.</div>
+                    
+                  </div>
                 </div>
-              </div>
 
-              {/* Title */}
-              <h1 className="text-3xl font-bold text-center text-gray-900 mb-3">
-                Analysis in Progress
-              </h1>
-              <p className="text-center text-gray-600 mb-12">
-                Our AI is currently auditing your document for risk and compliance.
-              </p>
-
-              {/* Progress Steps */}
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 mb-8">
-                <div className="space-y-4">
-                  <ProgressStep 
-                    completed={progressStep > 0}
-                    active={progressStep === 0}
-                    text="Scanning document structure"
-                  />
-                  <ProgressStep 
-                    completed={progressStep > 1}
-                    active={progressStep === 1}
-                    text="Identifying key clauses"
-                  />
-                  <ProgressStep 
-                    completed={progressStep > 2}
-                    active={progressStep === 2}
-                    text="Analyzing risk vectors"
-                  />
-                  <ProgressStep 
-                    completed={progressStep > 3}
-                    active={progressStep === 3}
-                    text="Generating plain-English explanations"
-                  />
+                {/* Model Run panel */}
+                <div>
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+                    <div className="text-sm font-semibold text-gray-900 mb-3">Model Run</div>
+                    <div className="space-y-2 text-sm">
+                      <div><span className="text-gray-500">Model:</span> {modelMetrics.model.toUpperCase()}</div>
+                      <div><span className="text-gray-500">Prompt strategy:</span> {modelMetrics.promptStrategy || 'Structured extraction + explainability'}</div>
+                      <div><span className="text-gray-500">Output format:</span> {modelMetrics.outputFormat || 'Strict JSON (Zod-validated)'}</div>
+                      <div><span className="text-gray-500">Tokens:</span> {Number(modelMetrics.tokensIn).toLocaleString()} in / {Number(modelMetrics.tokensOut).toLocaleString()} out</div>
+                      <div><span className="text-gray-500">Latency:</span> {modelMetrics.latencySec ? `${modelMetrics.latencySec.toFixed(1)}s` : '—'}</div>
+                      <div><span className="text-gray-500">Estimated cost:</span> ${modelMetrics.estimatedCostUSD.toFixed(3)}</div>
+                      <div><span className="text-gray-500">Temperature:</span> {modelMetrics.temperature}</div>
+                      <div><span className="text-gray-500">Retries:</span> {modelMetrics.retries} {modelMetrics.retries>0?'(subsequent fix applied)':'(initial output valid)'}</div>
+                      <div><span className="text-gray-500">Validation:</span> {modelMetrics.zodPassed ? '✅ Passed Zod schema' : 'Pending…'}</div>
+                      <div><span className="text-gray-500">Confidence threshold:</span> {modelMetrics.confidenceThreshold.toFixed(2)} (below → “Needs Review”)</div>
+                      <div><span className="text-gray-500">Clauses detected:</span> {analysis ? analysis.clauses?.length : '—'}</div>
+                      <div><span className="text-gray-500">Clauses flagged:</span> {analysis ? analysis.clauses.filter((c:any)=>['high','medium'].includes(String(c.risk||'').toLowerCase())).length : '—'}</div>
+                    </div>
+                    <Button onClick={() => setOutputOpen(true)} className="mt-4 w-full bg-yellow-400 hover:bg-yellow-500 text-gray-900">View structured output</Button>
+                  </div>
                 </div>
-              </div>
-
-              {/* Security Notice */}
-              <div className="flex items-center justify-center gap-2 text-xs text-gray-500">
-                <div className="size-3 rounded-full bg-green-500" />
-                <span>Secure AES-256 processing active</span>
               </div>
             </div>
           </div>
 
-          {/* Footer */}
-          <footer className="border-t border-gray-200 bg-gray-50">
-            <div className="mx-auto max-w-7xl px-6 py-6">
-              <div className="flex items-center justify-center gap-12 text-sm">
-                <div className="text-center">
-                  <div className="text-xl font-bold text-gray-900">10k+</div>
-                  <div className="text-xs text-gray-600">Contracts Analyzed</div>
+          {/* Structured output drawer */}
+          <Sheet open={outputOpen} onOpenChange={setOutputOpen}>
+            <SheetContent side="right" className="sm:max-w-xl">
+              <SheetHeader>
+                <SheetTitle>Structured Output</SheetTitle>
+              </SheetHeader>
+              <div className="mt-4 space-y-3">
+                <div className="text-xs text-gray-500">Schema: ContractAnalysisSchema v2</div>
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs overflow-auto max-h-[60vh]">
+                  <pre className="whitespace-pre-wrap">{analysis ? JSON.stringify(analysis, null, 2) : 'Waiting for model output…'}</pre>
                 </div>
-                <div className="text-center">
-                  <div className="text-xl font-bold text-gray-900">99.9%</div>
-                  <div className="text-xs text-gray-600">Uptime</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-xl font-bold text-gray-900">AES-256</div>
-                  <div className="text-xs text-gray-600">Encrypted</div>
-                </div>
+                {modelMetrics.retries > 0 && (
+                  <div className="text-xs text-gray-600">Diff view unavailable: attempts not captured in API response.</div>
+                )}
               </div>
-              <div className="mt-4 flex items-center justify-center gap-6 text-xs text-gray-600">
-                <a href="#" className="hover:text-gray-900">Terms</a>
-                <a href="#" className="hover:text-gray-900">Privacy</a>
-                <a href="#" className="hover:text-gray-900">API</a>
-              </div>
-            </div>
-          </footer>
+            </SheetContent>
+          </Sheet>
         </div>
       )}
 
       {/* Show results page after analysis */}
-      {!loading && analysis && (
+      {!showPipeline && !loading && analysis && (
         <div className="min-h-svh flex flex-col bg-gray-50">
-          {/* Header */}
-          <header className="sticky top-0 z-20 bg-white border-b border-gray-200">
-            <div className="mx-auto px-6 py-3 flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2">
-                  <div className="size-6 rounded bg-gray-900 text-white grid place-items-center text-xs">C</div>
-                  <span className="font-semibold">Coco</span>
-                </div>
-                <div className="flex items-center gap-2 text-sm text-gray-600">
-                  <span>{contractType.replace('_', ' ')}</span>
-                  <span>›</span>
-                  <span className="font-medium">Analysis Results</span>
-                </div>
+          <AppHeader />
+          
+          {/* Breadcrumb and Actions Bar */}
+          <div className="bg-white border-b border-gray-200 px-6 py-3">
+            <div className="mx-auto flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                <span>{contractType.replace('_', ' ')}</span>
+                <span>›</span>
+                <span className="font-medium">Analysis Results</span>
               </div>
               <div className="flex items-center gap-3">
-                <Button variant="outline" size="sm" onClick={exportJSON}>
+                <Button variant="outline" size="sm" onClick={exportFullReport} disabled={!analysis}>
                   Export Report
                 </Button>
                 <Button size="sm" className="bg-yellow-400 hover:bg-yellow-500 text-gray-900">
                   Request Revision
                 </Button>
-                <div className="size-9 rounded-full bg-yellow-400 grid place-items-center">
-                  <User className="size-4 text-gray-900" />
-                </div>
               </div>
             </div>
-          </header>
+          </div>
 
           {/* Main Content - Split View */}
           <div className="flex-1 flex">
+            {/* Hidden printable report root */}
+            <div className="absolute -left-[9999px] top-0 w-[1024px] bg-white" aria-hidden ref={reportRef}>
+              <div className="p-8">
+                <div className="text-2xl font-bold text-gray-900">Coco — Contract Analysis Report</div>
+                <div className="text-xs text-gray-600 mt-1">{new Date().toLocaleString()} · Type: {contractType.replace('_',' ')} · Persona: {persona} · Jurisdiction: {jurisdiction}</div>
+                <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
+                  <div className="border rounded-md p-3"><div className="text-gray-500 text-xs">Risk Level</div><div className="font-semibold">{analysis.overall.risk_level} ({analysis.overall.risk_score})</div></div>
+                  <div className="border rounded-md p-3"><div className="text-gray-500 text-xs">Confidence</div><div className="font-semibold">{Math.round((analysis.overall.confidence||0.85)*100)}%</div></div>
+                  <div className="border rounded-md p-3"><div className="text-gray-500 text-xs">Model</div><div className="font-semibold">{modelMetrics.model.toUpperCase()}</div></div>
+                </div>
+                <div className="mt-6">
+                  <div className="text-lg font-semibold mb-2">Findings</div>
+                  <div className="space-y-8">
+                    {analysis.clauses.map((clause:any, idx:number) => (
+                      <div key={idx}>
+                        <div className="flex items-start justify-between">
+                          <div className="text-base font-semibold">{idx+1}. {clause.title || clause.category || 'Clause'}</div>
+                          <div className="text-xs px-2 py-0.5 rounded border">{String(clause.risk||'standard').toUpperCase()}</div>
+                        </div>
+                        <div className="mt-2 text-sm text-gray-700">{clause.plain_english || clause.why_risky}</div>
+                        {clause.evidence_quotes && clause.evidence_quotes.length>0 && (
+                          <div className="mt-2 border-l-2 border-blue-400 pl-3 text-xs text-gray-700">
+                            <div className="text-blue-600 font-medium">Evidence</div>
+                            <div>“{clause.evidence_quotes[0].quote}”</div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {analysis.missing_or_weak_clauses?.length>0 && (
+                  <div className="mt-6">
+                    <div className="text-lg font-semibold mb-2">Missing / Unclear Clauses</div>
+                    <div className="space-y-3">
+                      {analysis.missing_or_weak_clauses.map((m:any, i:number)=> (
+                        <div key={i} className="border rounded p-3">
+                          <div className="text-sm font-semibold">{m.category}</div>
+                          <div className="text-xs text-gray-700 mt-1">{m.why_it_matters}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="mt-6">
+                  <div className="text-lg font-semibold mb-2">Original Document (excerpt)</div>
+                  <div className="text-xs whitespace-pre-wrap border rounded p-3 bg-gray-50">
+                    {(contractText || '').slice(0, 2000)}{(contractText || '').length>2000 ? '…' : ''}
+                  </div>
+                </div>
+              </div>
+            </div>
             {/* Left: Original Document */}
             <div className="w-1/2 border-r border-gray-200 bg-white overflow-auto">
               <div className="p-8">
@@ -369,25 +712,112 @@ export default function ContractAnalyzerPage() {
                   </div>
                 </div>
                 <div className="prose max-w-none">
-                  <div className="whitespace-pre-wrap text-sm leading-relaxed">
+                  <div className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">
                     {contractText.split('\n').map((paragraph, idx) => {
-                      const hasHighRisk = analysis.clauses.some((c: any) => 
-                        c.risk_level === 'high' && paragraph.toLowerCase().includes(c.title?.toLowerCase() || '')
-                      );
-                      const hasMediumRisk = !hasHighRisk && analysis.clauses.some((c: any) => 
-                        c.risk_level === 'medium' && paragraph.toLowerCase().includes(c.title?.toLowerCase() || '')
-                      );
+                      // Skip empty paragraphs from highlighting logic but still render them
+                      if (!paragraph.trim()) {
+                        return <p key={idx} className="mb-3">{'\u00A0'}</p>;
+                      }
+
+                      // Check if this paragraph contains any evidence quote or matches clause content
+                      let highlightInfo: { color: string; risk: string; icon: string; clauseTitle: string } | null = null;
+                      let bestScore = 0;
+                      
+                      analysis.clauses.forEach((c: any) => {
+                        // Skip if already found a match
+                        // Continue seeking a better score even after a preliminary match
+
+                        // Normalize text for flexible matching
+                        const normalizedParagraph = normalizeText(paragraph);
+                        
+                        // Check evidence quotes first
+                        if (c.evidence_quotes && c.evidence_quotes.length > 0) {
+                          c.evidence_quotes.forEach((ev: any) => {
+                            const normalizedQuote = normalizeText(ev.quote || '');
+                            const score = matchScore(normalizedParagraph, normalizedQuote);
+                            if (score > bestScore) {
+                              bestScore = score;
+                              if (score >= 0.25) {
+                                if (c.risk === 'high') {
+                                  highlightInfo = {
+                                    color: 'bg-red-100 border-l-[6px] border-red-600',
+                                    risk: 'HIGH RISK',
+                                    icon: '⚠️',
+                                    clauseTitle: c.title || c.category || 'Clause'
+                                  };
+                                } else if (c.risk === 'medium') {
+                                  highlightInfo = {
+                                    color: 'bg-yellow-100 border-l-[6px] border-yellow-600',
+                                    risk: 'CAUTION',
+                                    icon: '⚡',
+                                    clauseTitle: c.title || c.category || 'Clause'
+                                  };
+                                } else {
+                                  highlightInfo = {
+                                    color: 'bg-blue-100 border-l-[6px] border-blue-600',
+                                    risk: 'REVIEW',
+                                    icon: 'ℹ️',
+                                    clauseTitle: c.title || c.category || 'Clause'
+                                  };
+                                }
+                              }
+                            }
+                          });
+                        }
+
+                        // Fallback: match paragraph to clause title/category/why_risky if no evidence quotes
+                        if (!highlightInfo) {
+                          const targets = [c.title, c.category, c.why_risky, c.plain_english].filter(Boolean);
+                          for (const t of targets) {
+                            const score = matchScore(normalizedParagraph, String(t));
+                            if (score > bestScore && score >= 0.35) {
+                              bestScore = score;
+                              if (c.risk === 'high') {
+                                highlightInfo = {
+                                  color: 'bg-red-100 border-l-[6px] border-red-600',
+                                  risk: 'HIGH RISK',
+                                  icon: '⚠️',
+                                  clauseTitle: c.title || c.category || 'Clause'
+                                };
+                              } else if (c.risk === 'medium') {
+                                highlightInfo = {
+                                  color: 'bg-yellow-100 border-l-[6px] border-yellow-600',
+                                  risk: 'CAUTION',
+                                  icon: '⚡',
+                                  clauseTitle: c.title || c.category || 'Clause'
+                                };
+                              } else {
+                                highlightInfo = {
+                                  color: 'bg-blue-100 border-l-[6px] border-blue-600',
+                                  risk: 'REVIEW',
+                                  icon: 'ℹ️',
+                                  clauseTitle: c.title || c.category || 'Clause'
+                                };
+                              }
+                              break;
+                            }
+                          }
+                        }
+                      });
                       
                       return (
-                        <p 
+                        <div 
                           key={idx} 
-                          className={`mb-4 ${
-                            hasHighRisk ? 'bg-red-50 border-l-4 border-red-400 pl-4 py-2' : 
-                            hasMediumRisk ? 'bg-yellow-50 border-l-4 border-yellow-400 pl-4 py-2' : ''
-                          }`}
+                          className={`mb-3 ${highlightInfo ? `${highlightInfo.color} pl-4 py-3 rounded-r shadow-sm` : ''}`}
                         >
-                          {paragraph || '\u00A0'}
-                        </p>
+                          <p className={`${highlightInfo ? 'font-semibold text-gray-900' : 'text-gray-700'}`}>
+                            {paragraph || '\u00A0'}
+                          </p>
+                          {highlightInfo && (
+                            <div className={`text-[10px] font-bold mt-2 uppercase tracking-wide ${
+                              highlightInfo.risk === 'HIGH RISK' ? 'text-red-700' :
+                              highlightInfo.risk === 'CAUTION' ? 'text-yellow-800' :
+                              'text-blue-700'
+                            }`}>
+                              {highlightInfo.icon} {highlightInfo.risk}: {highlightInfo.clauseTitle}
+                            </div>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
@@ -415,7 +845,7 @@ export default function ContractAnalyzerPage() {
                 {/* Risk Cards */}
                 <div className="space-y-4">
                   {analysis.clauses.map((clause: any, idx: number) => {
-                    const risk = (clause.risk_level || '').toLowerCase();
+                    const risk = (clause.risk || '').toLowerCase();
                     const isHighRisk = risk === 'high';
                     const isMediumRisk = risk === 'medium';
                     
@@ -485,8 +915,8 @@ export default function ContractAnalyzerPage() {
                   <div className="flex items-center gap-2 text-sm">
                     <span className="text-yellow-500">⚠️</span>
                     <span className="text-gray-700">
-                      Total <strong>{analysis.clauses.filter((c: any) => c.risk_level === 'high').length}</strong> critical risks 
-                      and <strong>{analysis.clauses.filter((c: any) => c.risk_level === 'medium').length}</strong> minor alerts detected.
+                      Total <strong>{analysis.clauses.filter((c: any) => c.risk === 'high').length}</strong> critical risks 
+                      and <strong>{analysis.clauses.filter((c: any) => c.risk === 'medium').length}</strong> minor alerts detected.
                     </span>
                   </div>
                   <Button variant="link" className="text-xs text-blue-600">
@@ -499,25 +929,19 @@ export default function ContractAnalyzerPage() {
         </div>
       )}
 
-      {/* Show form when not loading and no analysis */}
-      {!loading && !analysis && (
+      {/* Show form view; stay here during loading unless user opens pipeline */}
+      {!showPipeline && (!analysis || loading) && (
         <>
-      {/* Header */}
-      <div className="px-5 pt-5 pb-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="size-8 rounded-md bg-yellow-400/20 text-yellow-500 grid place-items-center"><Shield className="size-4" /></div>
-          <div>
-            <div className="text-lg font-semibold">Coco</div>
-            <div className="text-[10px] text-slate-500 tracking-wide">ANALYSIS CONSOLE</div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="size-9 rounded-full grid place-items-center border border-slate-200 text-slate-600">⚙️</div>
-          <div className="size-9 rounded-full grid place-items-center border border-slate-200 bg-slate-900 text-white">👤</div>
-        </div>
-      </div>
 
       <div className="mx-auto max-w-md px-4 pb-28">
+        {loading && (
+          <div className="mb-3 flex items-center justify-between rounded-lg border border-yellow-200 bg-yellow-50 px-3 py-2 text-sm">
+            <span className="text-yellow-800">Analyzing… You can view live progress.</span>
+            <Button size="sm" className="bg-yellow-400 hover:bg-yellow-500 text-gray-900" onClick={() => setShowPipeline(true)}>
+              View pipeline
+            </Button>
+          </div>
+        )}
         {/* Draft Document */}
         <Card className="rounded-2xl shadow-sm border border-slate-200 bg-white">
           <div className="p-4">
@@ -562,6 +986,18 @@ export default function ContractAnalyzerPage() {
               </div>
             </div>
 
+            <div className="mt-3">
+              <div className="text-[10px] text-slate-500 uppercase tracking-wide">Model</div>
+              <Select value={modelId} onValueChange={(v) => setModelId(v)}>
+                <SelectTrigger className="bg-white border-slate-200 h-10"><SelectValue placeholder="Select model" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gpt-4o">GPT-4o</SelectItem>
+                  <SelectItem value="gpt-4o-mini">GPT-4o-mini</SelectItem>
+                  <SelectItem value="gpt-4-turbo">GPT-4 Turbo</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
             {error && <p className="text-red-500 text-xs mt-2">{error}</p>}
 
             <Button
@@ -574,71 +1010,7 @@ export default function ContractAnalyzerPage() {
           </div>
         </Card>
 
-        {/* Risk Profile */}
-        <div className="mt-8">
-          <div className="flex items-center justify-between">
-            <div className="text-slate-900 font-semibold">Risk Profile</div>
-            {analysis && (
-              <div className="text-[11px] px-2 py-1 rounded-full bg-yellow-100 text-yellow-700 border border-yellow-200">
-                {analysis.overall.risk_level?.replace('_',' ').toUpperCase()}
-              </div>
-            )}
-          </div>
-
-          <Card className="mt-3 rounded-2xl border border-slate-200 bg-white">
-            <div className="p-5 flex flex-col items-center">
-              <Gauge score={analysis ? analysis.overall.risk_score : 62} />
-              <div className="mt-4 grid grid-cols-3 gap-4 w-full text-center">
-                <div>
-                  <div className="text-[11px] text-slate-500">CONFIDENCE</div>
-                  <div className="text-sm font-semibold">{analysis ? `${(analysis.overall.confidence*100).toFixed(1)}%` : '98.4%'}</div>
-                </div>
-                <div>
-                  <div className="text-[11px] text-slate-500">CLARITY</div>
-                  <div className="text-sm font-semibold">{analysis ? (analysis.overall.clarity || '—') : 'Low'}</div>
-                </div>
-                <div>
-                  <div className="text-[11px] text-slate-500">EXPOSURE</div>
-                  <div className="text-sm font-semibold">{analysis ? (analysis.overall.exposure || '—') : 'Mid'}</div>
-                </div>
-              </div>
-            </div>
-          </Card>
-        </div>
-
-        {/* Detailed Findings */}
-        <div className="mt-8">
-          <div className="text-[11px] tracking-[0.2em] text-slate-500">DETAILED FINDINGS</div>
-          <div className="mt-3 space-y-4">
-            {analysis ? (
-              analysis.clauses.slice(0, 5).map((clause: any, idx: number) => {
-                const risk = (clause.risk_level || '').toLowerCase();
-                const badgeColor = risk === 'high' ? 'bg-red-100 text-red-700 border-red-200' : risk === 'medium' ? 'bg-yellow-100 text-yellow-700 border-yellow-200' : 'bg-green-100 text-green-700 border-green-200';
-                const badgeLabel = risk === 'high' ? 'CRITICAL' : risk === 'medium' ? 'STANDARD' : 'SAFE';
-                return (
-                  <Card key={idx} className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-                    <div className="p-4">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className={`text-[10px] px-2 py-1 rounded-full border ${badgeColor}`}>{badgeLabel}</div>
-                        <div className="size-7 rounded-full grid place-items-center bg-slate-100 text-slate-600 border border-slate-200">!</div>
-                      </div>
-                      <div className="text-base font-semibold">
-                        {clause.title || clause.category || 'Clause'}
-                      </div>
-                      <p className="mt-2 text-sm text-slate-600">{clause.why_risky}</p>
-                      <div className="mt-3 flex items-center gap-2">
-                        <Button className="h-10 rounded-xl bg-yellow-400 hover:bg-yellow-300 text-black">Fix with AI</Button>
-                        <Button variant="outline" className="h-10 rounded-xl">Flag</Button>
-                      </div>
-                    </div>
-                  </Card>
-                );
-              })
-            ) : (
-              <Card className="rounded-2xl border border-slate-200 bg-white p-4 text-slate-500">Run an analysis to see detailed findings.</Card>
-            )}
-          </div>
-        </div>
+        {/* Risk Profile and Detailed Findings removed to simplify pre-analysis screen */}
 
         {/* Metrics */}
         {metrics && (
