@@ -1,4 +1,6 @@
 version: 1
+runtime-versions:
+  nodejs: 20
 frontend:
   phases:
     preBuild:
@@ -17,8 +19,6 @@ frontend:
     paths:
       - node_modules/**/*
       - .next/cache/**/*
-  runtime-versions:
-    nodejs: 20
   environment:
     variables:
       NEXT_TELEMETRY_DISABLED: '1'
