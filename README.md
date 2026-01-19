@@ -21,7 +21,6 @@ This README is a slow-scrolling walkthrough so viewers can understand the produc
 			<em>Home: choose type/persona/model and analyze.</em>
 		</td>
 	
-	</tr>
   
 </table>
 
