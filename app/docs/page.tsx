@@ -4,6 +4,11 @@ import { AppHeader } from '@/components/app-header';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { FileText, ShieldCheck, Code, Cpu, ListChecks, Gauge, Workflow, Rocket } from 'lucide-react';
+import showcase1 from './showcase1.png';
+import showcase2 from './showcase2.png';
+import showcase3 from './showcase3.png';
+import showcase4 from './showcase4.png';
+import showcase5 from './showcase5.png';
 
 export default function DocsPage() {
   const apiSnippet = `// app/api/contract/analyze/route.ts (simplified)\nimport { NextResponse } from 'next/server';\nimport { openai } from '@ai-sdk/openai';\nimport { generateObject } from 'ai';\nimport { ContractAnalysisSchema } from '@/lib/contract-analyzer/schemas';\n\nexport const runtime = 'nodejs';\n\nexport async function POST(request: Request) {\n  const { contractText, modelId } = await request.json();\n  const system = 'Structured extraction + explainability';\n  const prompt = 'Analyze contract and return JSON matching schema';\n\n  const result = await generateObject({\n    model: openai(modelId),\n    schema: ContractAnalysisSchema,\n    system,\n    prompt,\n    temperature: 0.5,\n  });\n\n  return NextResponse.json({\n    analysis: result.object,\n    tokensUsed: {\n      input: result.usage?.promptTokens || 0,\n      output: result.usage?.completionTokens || 0,\n    },\n    modelUsed: modelId,\n  });\n}`;
@@ -27,7 +32,35 @@ export default function DocsPage() {
     <div className="min-h-svh w-full bg-gray-50">
       <AppHeader />
       <main className="mx-auto max-w-6xl px-6 py-10">
-                {/* Showcase moved to GitHub README; keeping Docs focused on how it works. */}
+        {/* Showcase: same five images as README for parity */}
+        <section className="mb-8">
+          <h1 className="text-4xl font-bold tracking-tight text-gray-900 text-center">Product Showcase</h1>
+          <p className="mt-3 text-gray-600 text-center">A quick visual tour of the core experience.</p>
+          <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="rounded-lg border bg-white p-3">
+              <Image src={showcase1} alt="Home - Analyze Contract" className="w-full h-auto rounded-md" placeholder="blur" />
+              <div className="mt-2 text-sm text-gray-700">Home: choose type/persona/model and analyze.</div>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <Image src={showcase2} alt="Pipeline - Model Run & Steps" className="w-full h-auto rounded-md" placeholder="blur" />
+              <div className="mt-2 text-sm text-gray-700">Pipeline with tokens, latency, cost, retries.</div>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <Image src={showcase3} alt="Analysis Results - Dashboard" className="w-full h-auto rounded-md" placeholder="blur" />
+              <div className="mt-2 text-sm text-gray-700">Results dashboard with evidence and clause table.</div>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <Image src={showcase4} alt="Diff View - Suggested Redlines" className="w-full h-auto rounded-md" placeholder="blur" />
+              <div className="mt-2 text-sm text-gray-700">Diff view with suggested redlines.</div>
+            </div>
+          </div>
+          <div className="mt-4">
+            <div className="rounded-lg border bg-white p-3">
+              <Image src={showcase5} alt="Metrics & Export" className="w-full h-auto rounded-md" placeholder="blur" />
+              <div className="mt-2 text-sm text-gray-700 text-center">Metrics & Export: model, tokens, latency, retries, PDF.</div>
+            </div>
+          </div>
+        </section>
         <section className="mb-8 text-center">
           <h1 className="text-4xl font-bold tracking-tight text-gray-900">Docs / How This Works</h1>
           <p className="mt-3 text-gray-600">A concise, product-oriented walkthrough of Coco’s system design and LLM usage.</p>
