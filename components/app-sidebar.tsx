@@ -68,7 +68,7 @@ export function AppSidebar({ user }: { user: User | undefined }) {
               className="flex flex-row items-center gap-3 px-3 py-2 rounded-md hover:bg-muted transition-colors"
             >
               <span className="w-2 h-2 rounded-full bg-primary" />
-              <span className="text-sm font-medium">Contract Analyzer</span>
+              <span className="text-sm font-medium">Contract Companion</span>
             </Link>
           </SidebarMenuItem>
         </SidebarMenu>
