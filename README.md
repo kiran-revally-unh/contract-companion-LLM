@@ -17,7 +17,7 @@ This README is a slow-scrolling walkthrough so viewers can understand the produc
 			<em>Home: choose type/persona/model and analyze.</em>
 		</td>
 	<td align="center">
-			<img src="app/docs/showcase1.png" alt="Home - Analyze Contract" width="430" /><br/>
+			<img src="app/docs/showcase1.png" alt="Home - Contract Companion" width="430" /><br/>
 			<em>Metrics & Export: Model, tokens, latency, retries, and PDF export</em>
 		</td>
 	
@@ -187,7 +187,7 @@ These screenshots highlight the core experience:
 <table align="center">
 	<tr>
 		<td align="center">
-			<img src="app/docs/showcase1.png" alt="Home - Analyze Contract" width="380" /><br/>
+			<img src="app/docs/showcase1.png" alt="Home - Contract Companion" width="380" /><br/>
 			<em></em>
 		</td>
 		<td align="center">

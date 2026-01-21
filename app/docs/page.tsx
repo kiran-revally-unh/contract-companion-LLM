@@ -38,7 +38,7 @@ export default function DocsPage() {
           <p className="mt-3 text-gray-600 text-center">A quick visual tour of the core experience.</p>
           <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="rounded-lg border bg-white p-3">
-              <Image src={showcase1} alt="Home - Analyze Contract" className="w-full h-auto rounded-md" placeholder="blur" />
+              <Image src={showcase1} alt="Home - Contract Companion" className="w-full h-auto rounded-md" placeholder="blur" />
               <div className="mt-2 text-sm text-gray-700">Home: choose type/persona/model and analyze.</div>
             </div>
             <div className="rounded-lg border bg-white p-3">

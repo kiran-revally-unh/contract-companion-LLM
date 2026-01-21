@@ -209,7 +209,7 @@ export default function HomePage() {
           {/* Title Section */}
           <div className="text-center mb-10">
             <h1 className="text-5xl font-bold tracking-tight text-gray-900 mb-3">
-              Analyze Contract
+              Contract Companion
             </h1>
             <p className="text-gray-600 text-base max-w-2xl mx-auto">
               Upload or paste contract text for high-fidelity legal review, risk assessment,<br />
